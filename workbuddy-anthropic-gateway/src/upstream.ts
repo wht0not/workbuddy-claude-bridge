@@ -1,3 +1,12 @@
+/**
+ * ⚠️ 逆向适配声明（合规要求，务必阅读）
+ *
+ * 本文件把请求转发到上游 WorkBuddy 客户端使用的私有接口
+ * （copilot.tencent.com）。该接口没有公开文档、不属于任何公开 API，
+ * 请求头（x-user-id / x-enterprise-id / x-domain 等）与行为来自对客户端的
+ * 观察，可能随时变更或下线；本项目不对可用性与稳定性做任何保证。
+ * 如腾讯提供官方桥接 / 开放 API，请优先迁移到官方方案。
+ */
 import type { Config } from "./config.ts";
 import type { Credential } from "./accounts.ts";
 

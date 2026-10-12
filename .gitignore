@@ -4,9 +4,19 @@ data/
 *.log
 config.local.json
 
+# 凭据与密钥类文件（任何目录下都不提交）
+*.info
+*.key
+*.pem
+.env
+.env.*
+
 # 系统与编辑器
 Thumbs.db
 desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# 本地工具/会话数据（不发布）
+.workbuddy/

@@ -1,11 +1,31 @@
-﻿import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+﻿/**
+ * ⚠️ 逆向适配声明（合规要求，务必阅读）
+ *
+ * 本网关把上游 WorkBuddy 客户端使用的私有接口（copilot.tencent.com）转录成本地
+ * Anthropic Messages API。该上游接口**没有公开文档、不属于任何公开 API**，
+ * 字段与行为来自对客户端的观察，可能随时变更或下线；本项目不对可用性与稳定性
+ * 做任何保证。若官方提供桥接 / 开放 API，请优先使用官方方案。
+ *
+ * 账号模型（合规边界）：
+ *   - 只使用**一个**你本人已登录的 WorkBuddy 账号（加载规则见 src/accounts.ts）；
+ *   - 没有账号池、没有请求间轮换、没有自动切换；换账号只能改配置后重载；
+ *   - 没有额度监控、刷取、多账号均衡等任何形式的额度套利功能。
+ */
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { watchFile } from "node:fs";
 import { CONFIG_PATH } from "./config.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureApiKey, loadConfig } from "./config.ts";
-import { AccountPool } from "./accounts.ts";
-import { buildUpstreamBody, modelCandidates, type AnthropicRequest } from "./anthropic.ts";
+import {
+  credentialLabel,
+  describeSkipped,
+  loadCredential,
+  refreshCredential,
+  type Credential,
+  type SkippedFile,
+} from "./accounts.ts";
+import { buildUpstreamBody, resolveModel, type AnthropicRequest } from "./anthropic.ts";
 import { forwardChat } from "./upstream.ts";
 import { renderPage } from "./page.ts";
 import {
@@ -20,21 +40,48 @@ import {
 
 const cfg = loadConfig();
 const apiKey = ensureApiKey();
-const pool = new AccountPool(cfg);
+
+/**
+ * 单账号状态。只在启动、配置热重载、401 刷新时变化，
+ * 一次请求内恒定，不在多个账号之间轮换。
+ */
+let account: Credential | null = null;
+let skippedFiles: SkippedFile[] = [];
+let accountNote = "";
+/** 401 刷新出的新令牌只活在内存里，不回写桌面端文件；重启后靠重新扫描补上。 */
+let tokenOverride: { uid: string; token: string } | null = null;
+
+function reloadAccount(): void {
+  const result = loadCredential(cfg);
+  let cred = result.credential;
+  if (cred && tokenOverride && tokenOverride.uid === cred.uid) {
+    cred = { ...cred, accessToken: tokenOverride.token };
+  }
+  account = cred;
+  skippedFiles = result.skipped;
+  accountNote = result.reason;
+}
+
+type CatalogModel = {
+  id: string;
+  name: string;
+  credits?: string;
+  descriptionZh?: string;
+  maxInputTokens?: number;
+};
 
 /** 上游官方模型目录(5 分钟缓存),供 /v1/models 动态发现 */
 const CATALOG_TTL = 5 * 60_000;
-let catalogCache: { models: { id: string; name: string; credits?: string; descriptionZh?: string; maxInputTokens?: number }[]; at: number } | null = null;
-async function upstreamCatalog(): Promise<{ models: { id: string; name: string; credits?: string; descriptionZh?: string; maxInputTokens?: number }[] }> {
+let catalogCache: { models: CatalogModel[]; at: number } | null = null;
+async function upstreamCatalog(): Promise<{ models: CatalogModel[] }> {
   if (catalogCache && Date.now() - catalogCache.at < CATALOG_TTL) return catalogCache;
-  const cred = pool.credentials[0];
-  if (!cred) return catalogCache ?? { models: [] };
+  if (!account) return catalogCache ?? { models: [] };
   try {
     const res = await fetch(cfg.upstream.baseUrl.replace(/\/+$/, "") + "/v2/enterprises/personal/models", {
       headers: {
-        authorization: `Bearer ${pool.tokenFor(cred)}`,
+        authorization: `Bearer ${account.accessToken}`,
         "user-agent": "WorkBuddy",
-        "x-user-id": cred.uid,
+        "x-user-id": account.uid,
       },
       signal: AbortSignal.timeout(15_000),
     });
@@ -59,7 +106,13 @@ async function upstreamCatalog(): Promise<{ models: { id: string; name: string; 
           m.id !== "default" &&
           !(m.tags ?? []).some((t) => t === "text-to-image"),
       )
-      .map((m) => ({ id: m.id as string, name: m.name ?? (m.id as string), credits: m.credits, descriptionZh: m.descriptionZh, maxInputTokens: m.maxInputTokens }));
+      .map((m) => ({
+        id: m.id as string,
+        name: m.name ?? (m.id as string),
+        credits: m.credits,
+        descriptionZh: m.descriptionZh,
+        maxInputTokens: m.maxInputTokens,
+      }));
     if (models.length) catalogCache = { models, at: Date.now() };
   } catch {
     // 拉取失败沿用旧缓存
@@ -68,16 +121,13 @@ async function upstreamCatalog(): Promise<{ models: { id: string; name: string; 
 }
 
 /**
- * 上游模型 id → 桌面端合规假名(claude-<slug>-<n>,匹配 ^claude-[a-z]+-\d+$)。
- * slug 取上游 id 的字母数字压缩;固定序号保证同一模型映射稳定。
+ * 上游模型 id → 桌面端合规假名(claude-haiku-<n>,匹配 ^claude-[a-z]+-\d+$)。
  * 桌面端发给网关假名,网关再反查回真实 id 转发上游。
  */
-const DISCOVERY_RE = /^claude-[a-z]+-\d+(?:-\d+)?$/;
-function aliasFor(upstreamId: string, seq: number): string {
+function aliasFor(upstreamId: string): string {
   // 假名必须稳定:同一真实模型 id,无论上游目录顺序怎么变、第几次发现,假名都一样。
   // 否则桌面端缓存的旧假名会失效,报 invalid_request_error(模型名路由不到)。
-  // 用 id 的字符码和做序号(10-98),同 id 恒同号。
-  // 用 SHA-1 前 4 字节做序号(纯函数,与调用顺序无关,重启不变)
+  // 用 id 的字符码和做序号(10-98),同 id 恒同号(纯函数,与调用顺序无关,重启不变)。
   let h = 0; for (const ch of upstreamId) h = (h * 31 + ch.charCodeAt(0)) >>> 0; const num = (h % 9890) + 10;
   return `claude-haiku-${num}`;
 }
@@ -86,14 +136,14 @@ const realToAlias = new Map<string, string>();
 
 async function ensureAliases(): Promise<void> {
   const { models } = await upstreamCatalog();
-  for (let i = 0; i < models.length; i++) {
-    const alias = aliasFor(models[i].id, i + 1);
-    aliasToReal.set(alias, models[i].id);
-    realToAlias.set(models[i].id, alias);
+  for (const m of models) {
+    const alias = aliasFor(m.id);
+    aliasToReal.set(alias, m.id);
+    realToAlias.set(m.id, alias);
   }
 }
 
-/** 配置热重载:改 config.json 保存即生效,无需重启(监听不依赖 cfg,永不过期) */
+/** 配置热重载:改 config.json / config.local.json 保存即生效,无需重启(监听不依赖 cfg,永不过期) */
 let reloadTimer: NodeJS.Timeout | null = null;
 watchFile(CONFIG_PATH, { interval: 1000 }, () => {
   if (reloadTimer) clearTimeout(reloadTimer);
@@ -101,6 +151,7 @@ watchFile(CONFIG_PATH, { interval: 1000 }, () => {
     try {
       const next = loadConfig();
       Object.assign(cfg, next);
+      reloadAccount(); // accounts.select 改了要跟着重新选账号
       log("配置已热重载: 模型映射 = " + JSON.stringify(next.models.map));
     } catch (error) {
       log("配置重载失败(保留旧配置): " + String(error));
@@ -108,8 +159,6 @@ watchFile(CONFIG_PATH, { interval: 1000 }, () => {
   }, 300);
 });
 
-/** 这些状态码说明「换个模型可能就好了」；其余（含 5xx、网络错误）直接放弃。 */
-const FALLBACK_STATUSES = new Set([400, 402, 403, 404, 429]);
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
 /** 诊断:WB_DUMP=1 时把请求落盘 data/dump;WB_DUMP=all 时连成功请求也存。 */
@@ -154,7 +203,7 @@ function errorType(status: number): string {
 
 function clientStatus(status: number): number {
   if (status === 0) return 502;
-  if (status === 402) return 429; // 积分耗尽，Anthropic 侧没有对应码
+  if (status === 402) return 429; // 额度耗尽，Anthropic 侧没有对应码
   if (status < 400 || status > 599) return 502;
   return status;
 }
@@ -199,16 +248,6 @@ function extractKey(req: IncomingMessage): string | null {
   const header = req.headers["x-api-key"];
   if (typeof header === "string" && header.trim()) return header.trim();
   return null;
-}
-
-function describeSkipped(): string {
-  if (pool.skipped.length === 0) return " 凭据目录里没有 .info 文件。";
-  return (
-    " 跳过的文件：" +
-    pool.skipped.map((s) => `\n  - ${s.path} → ${s.reason}`).join("") +
-    "\n提示：桌面端 5.6.0+ 会把令牌写成 $wbEncrypted 加密包装，读不了属正常。" +
-    "用 xdpool 插件的「添加账号」扫码登录，或让 workbuddy-switch 同步一次，会生成明文的 workbuddy-pool-*.info。"
-  );
 }
 
 async function serveSuccess(
@@ -313,85 +352,65 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse, raw: st
   const requestedRaw = typeof payload.model === "string" && payload.model ? payload.model : cfg.models.default;
   // 桌面端动态发现发的假名(claude-xxx-n)→ 反查真实上游模型;1M 变体带 [1m] 后缀,先剥掉
   const requested = aliasToReal.get(requestedRaw.replace(/\[1m\]$/i, "")) ?? requestedRaw.replace(/\[1m\]$/i, "");
-  // [临时排障] 记录 system 标记(只看是什么触发了 11128,排完删)
-  try {
-    const sys = payload.system;
-    const sysText = typeof sys === 'string' ? sys : (Array.isArray(sys) ? sys.map(b => (b && b.text) || '').join('|') : '');
-    if (/billing|cc_version|entrypoint|x-anthropic/i.test(sysText)) log(`   [标记] system 含: ${sysText.slice(0, 200)}`);
-  } catch {}
   const wantsStream = payload.stream === true;
   if (requested !== requestedRaw) log(`   假名 ${requestedRaw} → ${requested}`);
-  const preferredHeader = req.headers["x-wb-account"];
-  const preferred = typeof preferredHeader === "string" ? preferredHeader : null;
 
-  const cred = pool.pick(preferred);
-  if (!cred) {
-    sendError(res, 503, "本机没有可用的 WorkBuddy 账号。" + describeSkipped());
+  if (!account) {
+    sendError(res, 503, "本机没有可用的 WorkBuddy 账号。" + describeSkipped(skippedFiles));
     return;
   }
-  log(`→ ${wantsStream ? "流式" : "非流式"} model=${requested} account=${pool.label(cred)}`);
 
-  const candidates = modelCandidates(requested, cfg);
-  let lastStatus = 0;
-  let lastMessage = "";
-  let usedModel = candidates[0];
+  // 单模型：请求什么就用什么（经 map 解析），不做回退链
+  const model = resolveModel(requested, cfg);
+  log(`→ ${wantsStream ? "流式" : "非流式"} model=${model} account=${credentialLabel(account)}`);
 
-  for (const model of candidates) {
-    usedModel = model;
-    const body = buildUpstreamBody(payload, cfg, model);
-    if (DUMP && (model === candidates[0] || DUMP === "all")) dumpPair("req", payload, body, model);
+  const body = buildUpstreamBody(payload, cfg, model);
+  if (DUMP) dumpPair("req", payload, body, model);
 
-    const abort = new AbortController();
-    const onClose = () => abort.abort();
-    req.on("close", onClose);
+  const abort = new AbortController();
+  const onClose = () => abort.abort();
+  req.on("close", onClose);
 
-    let result = await forwardChat(cfg, cred, pool.tokenFor(cred), body, abort.signal);
-    let tokenExpired = false;
+  let result = await forwardChat(cfg, account, account.accessToken, body, abort.signal);
+  req.off("close", onClose);
 
-    if (!result.ok && result.status === 401) {
-      tokenExpired = true;
-      const refreshed = await pool.refresh(cred);
-      if (refreshed) {
-        log(`   ${pool.label(cred)} 令牌已刷新，重试`);
-        result = await forwardChat(cfg, refreshed, pool.tokenFor(refreshed), body, abort.signal);
-      }
+  // 401：只用当前账号自己的 refreshToken 续期一次，再失败就报错（不换账号）
+  if (!result.ok && result.status === 401 && account.refreshToken) {
+    const refreshed = await refreshCredential(account, cfg);
+    if (refreshed) {
+      tokenOverride = { uid: refreshed.uid, token: refreshed.accessToken };
+      account = refreshed;
+      log(`   ${credentialLabel(account)} 令牌已刷新，重试`);
+      const retryAbort = new AbortController();
+      const onRetryClose = () => retryAbort.abort();
+      req.on("close", onRetryClose);
+      result = await forwardChat(cfg, account, account.accessToken, body, retryAbort.signal);
+      req.off("close", onRetryClose);
     }
-
-    req.off("close", onClose);
-
-    if (result.ok) {
-      await serveSuccess(res, result.response, model, payload, wantsStream);
-      return;
-    }
-
-    lastStatus = result.status;
-    lastMessage = result.message;
-
-    if (tokenExpired && result.status === 401) {
-      sendError(
-        res,
-        401,
-        `账号「${pool.label(cred)}」登录态已失效且刷新失败。请在 WorkBuddy 桌面端重新登录，或用 xdpool 插件扫码添加账号。`,
-      );
-      return;
-    }
-
-    if (!cfg.modelFallback || !FALLBACK_STATUSES.has(result.status)) {
-      log(`   ${model} 失败 HTTP ${result.status}，放弃`);
-      sendError(res, clientStatus(result.status), lastMessage);
-      return;
-    }
-
-    log(`   ${model} 不可用（HTTP ${result.status}），尝试下一个模型`);
   }
 
-  sendError(res, clientStatus(lastStatus), `所有候选模型均不可用，最后一个错误：${lastMessage || "未知"}（最后尝试 ${usedModel}）`);
+  if (result.ok) {
+    await serveSuccess(res, result.response, model, payload, wantsStream);
+    return;
+  }
+
+  if (result.status === 401) {
+    sendError(
+      res,
+      401,
+      `账号「${credentialLabel(account)}」登录态已失效且刷新失败。请在 WorkBuddy 桌面端或 workbuddy-switch 里重新登录。`,
+    );
+    return;
+  }
+
+  log(`   ${model} 失败 HTTP ${result.status}`);
+  sendError(res, clientStatus(result.status), result.message);
 }
 
 function friendlyReason(status: number, message: string): string {
   if (status === 0) return "连不上腾讯的服务器。检查一下网络，或者你是不是开着代理？";
-  if (status === 401) return "账号的登录态过期了。去 WorkBuddy 桌面端重新登录一次，然后刷新这个页面。";
-  if (status === 402) return "这个账号的积分用完了。换一个账号，或者等积分恢复。";
+  if (status === 401) return "账号的登录态过期了。去 WorkBuddy 桌面端或 workbuddy-switch 重新登录一次，然后刷新这个页面。";
+  if (status === 402) return "这个账号的额度用完了。等额度恢复，或改用官方 API。";
   if (status === 403) return "账号没有权限使用这个模型。";
   if (status === 404) return "上游说这个模型不存在。检查 config.json 里的模型名。";
   if (status === 429) return "上游在限流，等一会儿再点一次。";
@@ -401,8 +420,7 @@ function friendlyReason(status: number, message: string): string {
 
 /** 页面上的「测一下」按钮。只监听回环地址，所以不再单独鉴权。 */
 async function handleTest(res: ServerResponse): Promise<void> {
-  const cred = pool.pick(null);
-  if (!cred) {
+  if (!account) {
     sendJson(res, 200, { ok: false, reason: "没有可用的 WorkBuddy 账号。" });
     return;
   }
@@ -412,66 +430,61 @@ async function handleTest(res: ServerResponse): Promise<void> {
     max_tokens: 300,
     messages: [{ role: "user", content: "用一句话打个招呼，证明你在正常工作。" }],
   };
+  const model = resolveModel(payload.model, cfg);
 
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120_000);
 
   try {
-    for (const model of modelCandidates(payload.model, cfg)) {
-      const result = await forwardChat(
-        cfg,
-        cred,
-        pool.tokenFor(cred),
-        buildUpstreamBody(payload, cfg, model),
-        controller.signal,
-      );
+    const result = await forwardChat(
+      cfg,
+      account,
+      account.accessToken,
+      buildUpstreamBody(payload, cfg, model),
+      controller.signal,
+    );
 
-      if (!result.ok) {
-        if (cfg.modelFallback && FALLBACK_STATUSES.has(result.status)) continue;
-        sendJson(res, 200, { ok: false, reason: friendlyReason(result.status, result.message) });
-        return;
-      }
-
-      const events: AnthropicEvent[] = [];
-      const translator = new AnthropicStreamTranslator(model, 0);
-      const decoder = createSseDecoder();
-      const textDecoder = new TextDecoder();
-      const reader = (result.response.body as ReadableStream<Uint8Array>).getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        for (const data of decoder(textDecoder.decode(value, { stream: true }))) {
-          if (data === "[DONE]") continue;
-          try {
-            for (const event of translator.push(JSON.parse(data) as UpstreamChunk)) events.push(event);
-          } catch {
-            // 分片不完整，跳过
-          }
-        }
-      }
-      for (const event of translator.finish()) events.push(event);
-
-      const message = eventsToMessage(events) as {
-        model?: string;
-        content?: { type: string; text?: string }[];
-      };
-      const text = (message.content ?? [])
-        .filter((block) => block.type === "text")
-        .map((block) => block.text ?? "")
-        .join("")
-        .trim();
-
-      sendJson(res, 200, { ok: true, text, model: message.model ?? model, ms: Date.now() - started });
+    if (!result.ok) {
+      sendJson(res, 200, { ok: false, reason: friendlyReason(result.status, result.message) });
       return;
     }
 
-    sendJson(res, 200, { ok: false, reason: "所有候选模型都没成功，检查 config.json 里的模型名对不对。" });
+    const events: AnthropicEvent[] = [];
+    const translator = new AnthropicStreamTranslator(model, 0);
+    const decoder = createSseDecoder();
+    const textDecoder = new TextDecoder();
+    const reader = (result.response.body as ReadableStream<Uint8Array>).getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const data of decoder(textDecoder.decode(value, { stream: true }))) {
+        if (data === "[DONE]") continue;
+        try {
+          for (const event of translator.push(JSON.parse(data) as UpstreamChunk)) events.push(event);
+        } catch {
+          // 分片不完整，跳过
+        }
+      }
+    }
+    for (const event of translator.finish()) events.push(event);
+
+    const message = eventsToMessage(events) as {
+      model?: string;
+      content?: { type: string; text?: string }[];
+    };
+    const text = (message.content ?? [])
+      .filter((block) => block.type === "text")
+      .map((block) => block.text ?? "")
+      .join("")
+      .trim();
+
+    sendJson(res, 200, { ok: true, text, model: message.model ?? model, ms: Date.now() - started });
   } catch (error) {
     sendJson(res, 200, {
       ok: false,
       reason: controller.signal.aborted
-        ? "等了两分钟还没回。这个模型这次想得太久了，可以再点一次，或者换个更快的模型。"
+        ? "等了两分钟还没回。这个模型这次想得太久了，可以再点一次。"
         : `测试出错：${String(error)}`,
     });
   } finally {
@@ -493,18 +506,21 @@ const server = createServer((req, res) => {
       }
 
       if (method === "GET" && path === "/healthz") {
-        pool.scan(true);
+        reloadAccount();
         sendJson(res, 200, {
           ok: true,
           endpoint: `http://${cfg.host}:${cfg.port}`,
-          accounts: pool.credentials.map((c) => ({
-            label: pool.label(c),
-            uid: c.uid.slice(0, 8),
-            hasRefreshToken: Boolean(c.refreshToken),
-            expiresAt: c.expiresAt,
-            source: c.sourcePath,
-          })),
-          skippedFiles: pool.skipped,
+          account: account
+            ? {
+                label: credentialLabel(account),
+                uid: account.uid.slice(0, 8),
+                hasRefreshToken: Boolean(account.refreshToken),
+                expiresAt: account.expiresAt,
+                source: account.sourcePath,
+              }
+            : null,
+          note: accountNote,
+          skippedFiles: skippedFiles,
           models: cfg.models,
         });
         return;
@@ -550,7 +566,7 @@ const server = createServer((req, res) => {
         const ordered = [
           ...FEATURED.map((id) => models.find((m) => m.id === id)).filter(Boolean),
           ...models.filter((m) => !FEATURED.includes(m.id)),
-        ] as typeof models;
+        ] as CatalogModel[];
         const rows = ordered.map((m, i) => {
           const alias = realToAlias.get(m.id) ?? m.id;
           const credit = m.credits ? m.credits.replace(/\s*credits?/i, "").trim() : "";
@@ -592,21 +608,24 @@ server.on("error", (error) => {
 });
 
 server.listen(cfg.port, cfg.host, () => {
-  pool.scan(true);
+  reloadAccount();
 
-  log("WorkBuddy → Anthropic 网关已启动");
+  log("WorkBuddy → Anthropic 网关已启动（单账号模式）");
+  log("⚠️ 上游接口为逆向适配，无公开文档，可能随时失效；如官方提供 API 请优先使用官方方案。");
   log(`  地址    http://${cfg.host}:${cfg.port}`);
   log(`  密钥    ${apiKey}`);
   log(`  密钥文件 data/api-key.txt`);
-  log(`  模型    默认 ${cfg.models.default}，回退链 ${(cfg.models.fallbackOrder ?? []).join(" → ")}`);
-  log(`  账号    ${pool.credentials.length} 个可用`);
-  for (const cred of pool.credentials) {
-    log(`          ✓ ${pool.label(cred)} (${cred.uid.slice(0, 8)}) ← ${cred.sourcePath}`);
+  log(`  模型    默认 ${cfg.models.default}（映射 ${Object.keys(cfg.models.map).length} 条，无回退链）`);
+  if (account) {
+    log(`  账号    ${credentialLabel(account)} (${account.uid.slice(0, 8)}) ← ${account.sourcePath}`);
+  } else {
+    log(`  账号    无可用账号`);
   }
-  for (const skip of pool.skipped) {
+  if (accountNote) log(`  说明    ${accountNote}`);
+  for (const skip of skippedFiles) {
     log(`          ✗ ${skip.path} → ${skip.reason}`);
   }
-  if (pool.credentials.length === 0) log(describeSkipped());
+  if (!account) log(describeSkipped(skippedFiles));
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

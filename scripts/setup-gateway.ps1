@@ -51,8 +51,11 @@ $health = $null
 try { $health = Invoke-WebRequest -Uri "http://127.0.0.1:8789/healthz" -TimeoutSec 10 -UseBasicParsing } catch {}
 if (-not $health -or $health.StatusCode -ne 200) { Die "Gateway failed. Run manually: cd $GatewayDir; node src/server.ts" }
 $hj = $health.Content | ConvertFrom-Json
-Ok ("Gateway up, accounts: " + $hj.accounts.Count)
-if ($hj.accounts.Count -eq 0) { Warn "No usable accounts (all encrypted-wrapped). Add via xdpool or workbuddy-switch, then re-run." }
+if ($hj.account) {
+  Ok ("Gateway up, account: " + $hj.account.label + " (single-account mode)")
+} else {
+  Warn "No usable account (all credential files encrypted-wrapped?). Log in via workbuddy-switch, or add via xdpool, then re-run."
+}
 $keyPath = "$GatewayDir\data\api-key.txt"
 if (-not (Test-Path $keyPath)) { Die "api-key.txt not generated" }
 $apiKey = (Get-Content $keyPath -Raw).Trim()
@@ -100,4 +103,5 @@ try {
 Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
 Write-Host "Next: fully quit Claude Desktop (tray icon -> Quit), reopen, pick any model."
+Write-Host "Reminder: personal learning/research use only; single account; no credit farming or account sharing."
 Write-Host "Troubleshooting: references\pitfalls.md"

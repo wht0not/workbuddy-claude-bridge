@@ -1,0 +1,40 @@
+{
+  "_comment": "WSL（Linux）内跑网关用的 config.json。与 config-template.json 的区别：所有 %VAR% 环境变量在 WSL 里不存在，必须写成 /mnt/c 绝对路径。把 <你> 换成你的 Windows 用户名。",
+
+  "port": 8789,
+  "host": "127.0.0.1",
+
+  "models": {
+    "default": "glm-5.3-flash",
+
+    "map": {
+      "claude-opus": "glm-5.3-flash",
+      "claude-sonnet": "deepseek-v4.1-flash",
+      "claude-haiku": "glm-5.3-flash",
+      "claude-fable": "hy3"
+    }
+  },
+
+  "upstream": {
+    "baseUrl": "https://copilot.tencent.com",
+    "chatPath": "/v2/chat/completions",
+    "refreshPath": "/v2/plugin/auth/token/refresh",
+    "timeoutMs": 300000
+  },
+
+  "accounts": {
+    "dirs": [
+      "/mnt/c/Users/<你>/AppData/Local/CodeBuddyExtension/Data/Public/auth",
+      "/mnt/c/Users/<你>/AppData/Roaming/CodeBuddyExtension/Data/Public/auth"
+    ],
+    "extraFiles": [],
+    "wbSwitchFiles": [
+      "/mnt/c/Users/<你>/.wb-switch/accounts.json"
+    ],
+    "select": null
+  },
+
+  "keepAliveMs": 15000,
+
+  "minMaxTokens": 8192
+}

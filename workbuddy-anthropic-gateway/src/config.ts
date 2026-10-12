@@ -8,11 +8,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(here, "..");
 export const DATA_DIR = join(ROOT, "data");
 export const CONFIG_PATH = join(ROOT, "config.json");
+/** 本地私有配置：不进 git（见 .gitignore），覆盖 config.json 的同名字段。 */
+export const LOCAL_CONFIG_PATH = join(ROOT, "config.local.json");
 
 export type ModelsConfig = {
   default: string;
   map: Record<string, string>;
-  fallbackOrder: string[];
 };
 
 export type UpstreamConfig = {
@@ -25,6 +26,14 @@ export type UpstreamConfig = {
 export type AccountsConfig = {
   dirs: string[];
   extraFiles: string[];
+  /** workbuddy-switch 的账号库（~/.wb-switch/accounts.json），明文令牌 + 带 refresh_token */
+  wbSwitchFiles: string[];
+  /**
+   * 手动指定用哪个账号（uid / uin / 备注名，大小写不敏感）。
+   * 不填则按文档规则自动选一个；填了就只认这一个。
+   * 合规边界：这里是唯一允许的"换账号"入口——改配置后重载，运行中不轮换。
+   */
+  select: string | null;
 };
 
 export type Config = {
@@ -33,17 +42,18 @@ export type Config = {
   models: ModelsConfig;
   upstream: UpstreamConfig;
   accounts: AccountsConfig;
-  modelFallback: boolean;
   keepAliveMs: number;
   minMaxTokens: number;
 };
 
-/** 展开 %APPDATA% 这类 Windows 环境变量，以及开头的 ~ */
+/** 展开 %APPDATA% 这类 Windows 环境变量，以及开头的 ~。
+ *  ~ 依次试 USERPROFILE（Windows）和 HOME（Linux / WSL），网关两边都能跑。 */
 export function expandEnv(input: string): string {
   let out = input;
   const tilde = out.match(/^~(?=[\\/]|$)/);
-  if (tilde && process.env.USERPROFILE) {
-    out = process.env.USERPROFILE + out.slice(1);
+  if (tilde) {
+    const home = process.env.USERPROFILE ?? process.env.HOME;
+    if (home) out = home + out.slice(1);
   }
   out = out.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (whole, name: string) => {
     const v = process.env[name] ?? process.env[name.toUpperCase()];
@@ -62,7 +72,6 @@ const DEFAULTS: Config = {
       "claude-sonnet": "glm-5.3-flash",
       "claude-haiku": "deepseek-v4.1-flash",
     },
-    fallbackOrder: ["glm-5.3-flash", "deepseek-v4.1-flash", "hy3"],
   },
   upstream: {
     baseUrl: "https://copilot.tencent.com",
@@ -76,8 +85,9 @@ const DEFAULTS: Config = {
       "%LOCALAPPDATA%/CodeBuddyExtension/Data/Public/auth",
     ],
     extraFiles: [],
+    wbSwitchFiles: ["~/.wb-switch/accounts.json"],
+    select: null,
   },
-  modelFallback: true,
   keepAliveMs: 15_000,
   minMaxTokens: 8192,
 };
@@ -86,11 +96,34 @@ function pick<T>(value: T | undefined, fallback: T): T {
   return value === undefined || value === null ? fallback : value;
 }
 
-export function loadConfig(): Config {
-  let raw: Partial<Config> = {};
-  if (existsSync(CONFIG_PATH)) {
-    raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8").replace(/^﻿/, "")) as Partial<Config>;
+/** 仅合并普通对象一层（配置就是 models/upstream/accounts 三个子对象 + 标量）。 */
+function mergeSection<T extends object>(base: T, override: Partial<T> | undefined): T {
+  if (!override) return base;
+  const out: Record<string, unknown> = { ...(base as Record<string, unknown>) };
+  for (const [k, v] of Object.entries(override)) {
+    if (v === undefined) continue;
+    const current = out[k];
+    if (
+      v && typeof v === "object" && !Array.isArray(v) &&
+      current && typeof current === "object" && !Array.isArray(current)
+    ) {
+      out[k] = { ...(current as Record<string, unknown>), ...(v as Record<string, unknown>) };
+    } else {
+      out[k] = v;
+    }
   }
+  return out as T;
+}
+
+function readJson(path: string): Partial<Config> {
+  if (!existsSync(path)) return {};
+  return JSON.parse(readFileSync(path, "utf8").replace(/^﻿/, "")) as Partial<Config>;
+}
+
+export function loadConfig(): Config {
+  // config.json（可入库）打底，config.local.json（已 gitignore）覆盖——
+  // 敏感/本机信息放后者，前者保持通用默认值。
+  const raw = mergeSection(readJson(CONFIG_PATH), readJson(LOCAL_CONFIG_PATH));
 
   const models = raw.models ?? ({} as Partial<ModelsConfig>);
   const upstream = raw.upstream ?? ({} as Partial<UpstreamConfig>);
@@ -102,7 +135,6 @@ export function loadConfig(): Config {
     models: {
       default: pick(models.default, DEFAULTS.models.default),
       map: pick(models.map, DEFAULTS.models.map),
-      fallbackOrder: pick(models.fallbackOrder, DEFAULTS.models.fallbackOrder),
     },
     upstream: {
       baseUrl: pick(upstream.baseUrl, DEFAULTS.upstream.baseUrl),
@@ -113,8 +145,9 @@ export function loadConfig(): Config {
     accounts: {
       dirs: pick(accounts.dirs, DEFAULTS.accounts.dirs).map(expandEnv),
       extraFiles: pick(accounts.extraFiles, DEFAULTS.accounts.extraFiles).map(expandEnv),
+      wbSwitchFiles: pick(accounts.wbSwitchFiles, DEFAULTS.accounts.wbSwitchFiles).map(expandEnv),
+      select: pick(accounts.select, DEFAULTS.accounts.select),
     },
-    modelFallback: pick(raw.modelFallback, DEFAULTS.modelFallback),
     keepAliveMs: pick(raw.keepAliveMs, DEFAULTS.keepAliveMs),
     minMaxTokens: pick(raw.minMaxTokens, DEFAULTS.minMaxTokens),
   };

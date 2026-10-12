@@ -1,5 +1,14 @@
 ﻿import type { Config } from "./config.ts";
 
+/**
+ * ⚠️ 逆向适配声明（合规要求，务必阅读）
+ *
+ * 本文件把 Anthropic Messages API 请求翻译成上游 WorkBuddy 客户端使用的私有
+ * OpenAI 风格接口。该接口**没有公开文档、不属于任何公开 API**，字段与行为来自
+ * 对客户端的观察，可能随时变更或下线，本项目不对可用性与稳定性做任何保证。
+ * 如腾讯后续提供官方桥接 / 开放 API，请优先迁移到官方方案。
+ */
+
 export type AnthropicRequest = {
   model: string;
   max_tokens?: number;
@@ -15,7 +24,8 @@ export type AnthropicRequest = {
 
 type OpenAIMessage = Record<string, unknown>;
 
-/** 请求的模型 → 上游模型。先查 map 的精确键，再按最长前缀匹配，claude-* 兜到底。 */
+/** 请求的模型 → 上游模型。先查 map 的精确键，再按最长前缀匹配，claude-* 兜到底。
+ *  合规边界：只解析"这一个"模型，不做多模型回退链——请求什么就用什么。 */
 export function resolveModel(requested: string, cfg: Config): string {
   const map = cfg.models.map ?? {};
   if (map[requested]) return map[requested];
@@ -28,18 +38,6 @@ export function resolveModel(requested: string, cfg: Config): string {
 
   if (/^claude/i.test(requested)) return cfg.models.default;
   return requested;
-}
-
-/** 依次尝试的模型列表：先请求的，再配置的回退顺序。 */
-export function modelCandidates(requested: string, cfg: Config): string[] {
-  const primary = resolveModel(requested, cfg);
-  const list = [primary];
-  if (!cfg.modelFallback) return list;
-  for (const model of cfg.models.fallbackOrder ?? []) {
-    if (model && !list.includes(model)) list.push(model);
-  }
-  if (cfg.models.default && !list.includes(cfg.models.default)) list.push(cfg.models.default);
-  return list;
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -65,11 +63,16 @@ function systemMessages(system: unknown, realModel: string): OpenAIMessage[] {
   );
 }
 
-/** 上游渠道校验会拦截 Claude Code 的计费标记头(11128 Illegal API invocation),整行移除。 */
+/**
+ * 上游渠道校验会拦截 Claude Code 的计费标记头(11128 Illegal API invocation),整行移除。
+ * ⚠️ 逆向规避：这是对上游私有校验规则的观察性对策，规则随时可能变化，
+ * 届时本函数可能失效（表现为请求被 400/403 拦截），且不保证有对应更新。
+ */
 
 /**
  * 上游渠道校验会识别"Claude Code 官方客户端"身份(11128),把 system 里的官方自我介绍替换为中性描述。
  * 只替换这三处固定文案,不碰用户/指令内容。
+ * ⚠️ 逆向规避：同上，属观察性对策，不保证长期有效。
  */
 export function sanitizeSystemIdentity(text: string, realModel = ""): string {
   // 上游渠道校验(11128)在 system 里 "Claude Code" 与 "Anthropic" 共现时触发;工具/用户内容不算。

@@ -36,7 +36,7 @@ https://copilot.tencent.com  (WorkBuddy 客户端同款接口)
 | 路线 | 工具 | 特点 |
 |---|---|---|
 | A | **xdpool 插件**(DSH 插件) | 在 DSH 里点「添加账号」扫码,即出明文凭据；登录方便 |
-| B | **workbuddy-switch**(独立 APP) | 桌面 APP，积分图表好看，同步一次也出明文凭据 |
+| B | **workbuddy-switch**(独立 APP) | 桌面 APP；**没有「同步」按钮**，登录后凭据落在 `~/.wb-switch/accounts.json`（网关直接读），且带 refresh_token 可自动续期 |
 
 ---
 
@@ -53,12 +53,12 @@ powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1
 体检项（脚本会自动给 ✅/❌):
 1. WorkBuddy 已登录（看 WorkBuddy 桌面端进程是否在跑）
 2. Node 能直接跑 .ts（脚本实测；不足就提示装新 LTS）
-3. 明文凭据存在（扫 `%APPDATA%` / `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-pool-*.info`)
+3. 明文凭据存在（扫 `%APPDATA%` / `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\*.info`，以及 `~/.wb-switch/accounts.json`）
 4. xdpool 插件已装（看 `DSH-Home\.workbuddy-xdpool` 目录）— **只在用户没凭据时才需要**
-5. workbuddy-switch 已装（看 `com.wbswitch.app` 或常见路径）— **与 4 二选一**
+5. workbuddy-switch 已装（看进程 `wb-switch-rust` / 目录 `%LOCALAPPDATA%\workbuddy-switch`，含其他盘符镜像）— **与 4 二选一**
 
 **对话模板**（照着说，别让用户自己猜）:
-> "先帮你体检一下电脑。结果：[X 有、Y 缺]。好消息是基础都在，只需要补一个 [凭据来源]。你想用 A(DSH 里的 xdpool 插件）还是 B（单独的 workbuddy-switch APP)？A 登录更方便，B 的积分图表更好看。"
+> "先帮你体检一下电脑。结果：[X 有、Y 缺]。好消息是基础都在，只需要补一个 [凭据来源]。你想用 A(DSH 里的 xdpool 插件）还是 B（单独的 workbuddy-switch APP)？A 登录更方便；B 的凭据带 refresh_token、过期能自动续期。"
 
 ## 阶段 1：装凭据来源（只在阶段 0 显示缺凭据时）
 
@@ -69,10 +69,12 @@ powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1
 
 **用户选 B(workbuddy-switch)**:
 1. 从 `references/download-links.md` 给官方下载地址（MSIX 安装包，双击装）
-2. 打开 APP → 登录 → 点「同步」
-3. 验证：`doctor.ps1` 第 3 项应变 ✅（出现 `workbuddy-pool-*.info`)
+2. 打开 APP → 登录（**注意：这个 APP 里没有「同步」按钮，也不用同步**——它登录后自己就把账号写进 `~/.wb-switch/accounts.json` 了）
+3. 验证：`doctor.ps1` 第 3 项应变 ✅。若仍显示 found 0，先确认账号库里真有账号：
+   `Get-Content "$env:USERPROFILE\.wb-switch\accounts.json"` 能看到 `access_token` 字段即为正常
 
-**避坑**：桌面端 5.6+ 会把令牌写成 `$wbEncrypted` 加密包装，这类文件网关会跳过。**必须有至少一个明文 pool 文件**，没有就回到这一步。
+**避坑**：桌面端 5.6+ 会把令牌写成 `$wbEncrypted` 加密包装，这类文件网关会跳过。**必须有至少一个明文明文来源**：
+xdpool 扫码产生的 `workbuddy-scan-*.info`，或 workbuddy-switch 的 `~/.wb-switch/accounts.json`（推荐，带 refresh_token 可自动续期）。详见 pitfalls.md #5 和 #16。
 
 ## 阶段 2：放网关代码 + 启动（2 分钟）
 
@@ -93,7 +95,15 @@ powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1
 
 ## 阶段 3：接入 Claude（按用户用哪个客户端分路）
 
-**路线一：Claude 桌面端（推荐，用户主要用这个）**
+**先问用户用哪个客户端**，三条路线差别很大：
+
+| 用户说 | 走 |
+|---|---|
+| "Claude 桌面端" / 有托盘图标 | 路线一 |
+| "终端里的 Claude Code" / 装了 cc-switch | 路线二 |
+| **"WSL / Ubuntu 里的 Claude Code"** | **路线三** |
+
+**路线一：Claude 桌面端**
 setup 脚本已写好 profile(`Claude-3p\configLibrary\...json`)。让用户**完全退出桌面端再打开**（右键托盘图标退出，不是关窗口）。选择器里应出现全部模型（glm-5.3-flash、deepseek-v4.1-flash、kimi-k3-1 等 28 个，带积分倍率）。
 
 **路线二：终端 Claude Code(cc-switch)**
@@ -102,6 +112,9 @@ setup 脚本已写好 profile(`Claude-3p\configLibrary\...json`)。让用户**�
 - `ANTHROPIC_AUTH_TOKEN` = `data\api-key.txt` 内容
 - `ANTHROPIC_DEFAULT_OPUS_MODEL` / `SONNET_MODEL` = `glm-5.3-flash`
 - `ANTHROPIC_DEFAULT_HAIKU_MODEL` = `deepseek-v4.1-flash`
+
+**路线三：WSL（Ubuntu）里的 Claude Code —— 见 `references/wsl-claude-code.md`**
+**别直接复用路线二**：WSL2 默认 NAT 下 `127.0.0.1:8789` 连不到 Windows 上的网关，且 WSL 的 node 常低于 22.18 跑不了 `.ts`。完整流程（含三种网络方案的取舍）在专门文档里，一次只让用户做一步。
 
 ## 阶段 4：验收（1 分钟）
 
@@ -123,6 +136,7 @@ setup 脚本已写好 profile(`Claude-3p\configLibrary\...json`)。让用户**�
 | "选择器只有 5 个模型" | 假名含黑名单词（glm/deepseek/kimi/…) 或没带 tier 字段 | pitfalls.md #4 |
 | "终端 CLI 报 400，桌面端好的" | 同上（计费标记） | pitfalls.md #3 |
 | "凭据全是 $wbEncrypted 被跳过" | 桌面端 5.6+ 加密包装 | pitfalls.md #5 |
+| "switch 装了却没有明文凭据 / 找不到「同步」按钮" | switch 根本不写 pool 文件，凭据在 `~/.wb-switch/accounts.json` | pitfalls.md #16 |
 | "配置写好了但桌面端像没读" | profile 写错位置（cc-switch 旧版写到容器外） | pitfalls.md #6 |
 | "模型名对不上 / 说自己是 Opus" | 系统提示扮演，看网关日志 `x-wb-model-used` | pitfalls.md #7 |
 | "一直是旧路径 / 重启后连不上" | 计划任务记录的旧绝对路径失效 | pitfalls.md #12 |

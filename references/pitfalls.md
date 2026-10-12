@@ -80,9 +80,9 @@
 
 **修法**（任选其一，产出明文 `workbuddy-pool-*.info`):
 - 用 **xdpool 插件**卡片的「添加账号」扫码登录
-- 让 **workbuddy-switch** 同步一次
+- 装 **workbuddy-switch** 并登录（不用点"同步"，它没有这个按钮；凭据在 `~/.wb-switch/accounts.json`，网关直接读，见 #16）
 
-**注意**:`workbuddy-pool-*.info` 里**没有 refreshToken**,401 时无法自动续期，只能提示用户重新登录（网关每 60 秒重扫目录，桌面端刷新后会自动跟上）。
+**注意**:`workbuddy-pool-*.info` 里**没有 refreshToken**,401 时无法自动续期，只能提示用户重新登录（重启网关会重新扫描凭据，`/healthz` 也会触发一次重扫）。
 
 ---
 
@@ -118,11 +118,11 @@
 
 ---
 
-## #8 某账号请求全 400，换账号就好
+## #8 请求全 400 / 401，像是"账号坏了"
 
 **根因**：该凭据的 uid 或令牌与上游记录不一致（比如 `.info` 文件是旧登录的残留，或账号被风控）。
 
-**修法**：网关轮询到别的账号就行。排查时可用 `x-wb-account: <uid|uin|备注名>` 请求头指定账号逐个测；坏的 `.info` 移出凭据目录即可（`%APPDATA%\CodeBuddyExtension\Data\Public\auth\`)。
+**修法**：本网关是**单账号模式**，没有"轮询到别的账号"这回事——把怀疑坏的 `.info` 移出凭据目录（`%APPDATA%\CodeBuddyExtension\Data\Public\auth\`），或在 WorkBuddy 桌面端 / workbuddy-switch 里重新登录，然后重启网关。如果本机存了多个账号，想固定用另一个，在 `config.json` 里配 `accounts.select`（uid / uin / 备注名）后重载。
 
 ---
 
@@ -205,3 +205,51 @@ NO_PROXY=localhost,127.0.0.1,::1,<你已有的条目>,copilot.tencent.com,codebu
 **注意**：本仓库的反代网关（8789）是独立进程、默认不读这些代理变量，不受此坑影响；它只咬 DSH 内核托管的那条链路。
 
 > 实测 2026-09-29：Clash 完全退出 + `NO_PROXY` 含上述域名，重启 DSH → 16 个模型全可用。
+
+---
+
+## #16 workbuddy-switch 装了，但就是没有明文凭据（没有「同步」按钮）
+
+**症状**：`doctor.ps1` 报 `workbuddy-switch APP installed` ✅，但凭据那项 `found 0`；
+按老文档去 APP 里找「同步」按钮，**根本没有这个按钮**，也找不到任何地方能"导出凭据"。
+
+**根因**（实测 2026-10-12，用 `strings` 扒二进制确认）：workbuddy-switch 是 Tauri 应用，
+**它从来不往 `CodeBuddyExtension\Data\Public\auth` 写 `workbuddy-pool-*.info`**。
+老文档"让 switch 同步一次 → 写出明文 pool 文件"这句是错的。
+
+它把账号存在自己的目录里：
+
+```
+C:\Users\<你>\.wb-switch\accounts.json        ← 账号库，明文 access_token / refresh_token
+C:\Users\<你>\.wb-switch\hook.sh              ← 它自己的钩子
+C:\Users\<你>\.wb-switch\credit_usage_snapshots.json
+```
+
+`accounts.json` 是数组，每个账号一条，字段是**下划线风格**（不是 `.info` 的驼峰）：
+
+```json
+[{
+  "access_token": "<明文，~1448 字符>",
+  "refresh_token": "<明文，~1088 字符>",
+  "auth_raw": { "accessToken": "...", "refreshToken": "...", "domain": "...", "expiresIn": 0 },
+  "uid": "...", "id": "...", "nickname": "...", "uin": "...",
+  "domain": "www.codebuddy.cn", "variant": "cn",
+  "enterpriseId": null,
+  "expiresAt": 0, "refreshExpiresAt": 0, "createdAt": 0
+}]
+```
+
+**修法（已内置）**：网关从 2026-10-12 起直接读 `~/.wb-switch/accounts.json`（配置项 `accounts.wbSwitchFiles`），
+`.info` 解析失败时自动 fallback 到 wb-switch 解析器。**你什么都不用做**，装好 switch 登录过就有凭据。
+
+**这条来源比 xdpool 更好**：带 `refresh_token`，令牌过期时网关能自己续期；xdpool 扫出来的 `workbuddy-scan-*.info` 没有 refreshToken，401 只能重扫。
+
+**顺带两个坑**：
+
+1. **switch 的进程名不是 `wbswitch`**，而是 `wb-switch-rust`；安装目录是 `%LOCALAPPDATA%\workbuddy-switch`
+   （不在 `\Programs` 下），且**可能装在非系统盘**（实测装在 `D:\Users\<你>\AppData\Local\workbuddy-switch`，
+   而 `%LOCALAPPDATA%` 仍指向 C 盘）。`doctor.ps1` 已改为按进程名/路径特征多形态探测，并镜像其他盘符。
+2. **`variant: "cn"` 的账号**（`domain: www.codebuddy.cn`）与 global 版（`www.workbuddy.ai`）不是一套后端。
+   网关按凭据里的 `domain` 发 `x-domain` 头，上游地址取 `config.json` 的 `upstream.baseUrl`，两边要对上。
+
+---

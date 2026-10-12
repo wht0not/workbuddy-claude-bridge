@@ -10,13 +10,7 @@
       "claude-sonnet": "deepseek-v4.1-flash",
       "claude-haiku": "glm-5.3-flash",
       "claude-fable": "hy3"
-    },
-
-    "fallbackOrder": [
-      "glm-5.3-flash",
-      "deepseek-v4.1-flash",
-      "hy3"
-    ]
+    }
   },
 
   "upstream": {
@@ -31,12 +25,14 @@
       "%APPDATA%/CodeBuddyExtension/Data/Public/auth",
       "%LOCALAPPDATA%/CodeBuddyExtension/Data/Public/auth"
     ],
-    "extraFiles": []
+    "extraFiles": [],
+    "wbSwitchFiles": [
+      "~/.wb-switch/accounts.json"
+    ],
+    "select": null
   },
 
-  "modelFallback": true,
   "keepAliveMs": 15000,
 
   "minMaxTokens": 8192
 }
-

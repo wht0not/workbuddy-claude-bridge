@@ -12,7 +12,13 @@
 | 工具 | 类型 | 获取方式 |
 |---|---|---|
 | **xdpool 插件** | DSH 插件 | DSH 桌面端 → 插件市场 → 搜 `workbuddy-xdpool` 安装；装好在插件卡片点「添加账号」扫码 |
-| **workbuddy-switch** | 独立 APP(MSIX) | 项目仓库 `CangShui/workbuddy-gateway` 或同类 WorkBuddy 账号池工具的 Releases 页下载 .msix 双击安装 |
+| **workbuddy-switch** | 独立 APP（普通 exe 安装器，**不是 MSIX**） | 项目仓库 `CangShui/workbuddy-gateway` 或同类工具的 Releases 页下载安装 |
+
+> **workbuddy-switch 安装后的真实形态**（2026-10-12 实测）：
+> - 进程名 `wb-switch-rust.exe`（不是 `wbswitch`）
+> - 目录 `%LOCALAPPDATA%\workbuddy-switch\`，**不在 `\Programs` 下**，且可能装在非系统盘
+> - 无 Appx 注册（`Get-AppxPackage` 查不到），所以 `doctor.ps1` 不能靠 Appx 判断
+> - **没有「同步」按钮**，也不需要同步：登录后凭据直接写进 `~/.wb-switch/accounts.json`（明文，带 refresh_token）
 
 ## Claude 侧
 
@@ -33,6 +39,8 @@
 
 - [ ] WorkBuddy 桌面端已登录
 - [ ] `node` 能直接跑 `.ts` 文件（22.18+ LTS）
-- [ ] `%APPDATA%\CodeBuddyExtension\Data\Public\auth\` 下有 `workbuddy-pool-*.info` 或 `workbuddy-scan-*.info`
-- [ ] `http://127.0.0.1:8789/healthz` 返回 `"ok":true`
+- [ ] 凭据来源至少一个：`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\` 下有明文 `.info`，**或** `~/.wb-switch/accounts.json` 里有 `access_token`
+- [ ] `http://127.0.0.1:8789/healthz` 返回 `"ok":true`，且 `accounts` 数组非空
 - [ ] 任务计划程序里有 `WorkBuddyGateway`（登录自启）
+
+> WSL 场景另见 `wsl-claude-code.md`。

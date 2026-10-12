@@ -19,7 +19,7 @@ export function renderPage(cfg: Config, apiKey: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WorkBuddy 借给 Claude Code 用</title>
+<title>WorkBuddy → Claude Code 本地网关</title>
 <style>
 :root{
   --paper:#F2F4F6; --ink:#141A1F; --muted:#5F6D79; --rule:#D5DCE2;
@@ -96,7 +96,7 @@ button:disabled{opacity:.45;cursor:default}
 <body>
 <main>
 
-<h1>WorkBuddy 的积分，借给 Claude Code 用</h1>
+<h1>把本机 WorkBuddy 登录态桥接给 Claude Code</h1>
 
 <div class="line">
   <div class="node">
@@ -130,10 +130,15 @@ button:disabled{opacity:.45;cursor:default}
 
 <section>
   <h2>测一下</h2>
-  <p class="note">按下去会真的发一条消息给 WorkBuddy，消耗一点点积分，成功就说明整条链路通了。</p>
+  <p class="note">按下去会真的发一条消息给上游，成功就说明整条链路通了。</p>
   <p><button class="primary" id="testBtn">发一条测试消息</button></p>
   <div id="testOut" class="out hide"></div>
 </section>
+
+<footer class="note" style="margin-top:48px;border-top:1px solid var(--rule);padding-top:16px">
+  仅供个人学习与技术研究。上游接口为逆向适配，无公开文档，可能随时失效；如官方提供 API 请优先使用官方方案。
+  请遵守腾讯服务条款，勿用于多账号刷额度、共享账号或商业用途，风险自担。
+</footer>
 
 </main>
 <script>
@@ -219,19 +224,19 @@ function buildTable() {
 }
 
 function render(s) {
-  var n = s.accounts.length;
+  var a = s.account;
 
-  if (n === 0) {
+  if (!a) {
     say("还没读到账号", "网关在跑，但没找到能用的 WorkBuddy 登录态。下面「账号」里有原因。", "bad");
   } else {
-    say("通了", n + " 个账号可用，把下面的配置填进 cc-switch 就能用。", "ok");
+    say("通了", "账号已就绪，把下面的配置填进 cc-switch 就能用。", "ok");
   }
 
-  $("accSub").textContent = n === 0 ? "没读到" : n + " 个可用";
+  $("accSub").textContent = a ? "1 个账号" : "没读到";
 
   var list = $("accList");
   list.innerHTML = "";
-  s.accounts.forEach(function (a) {
+  if (a) {
     var row = document.createElement("div");
     row.className = "row";
     var who = document.createElement("span");
@@ -243,7 +248,7 @@ function render(s) {
     row.appendChild(who);
     row.appendChild(what);
     list.appendChild(row);
-  });
+  }
   var skipList = $("skipList");
   skipList.innerHTML = "";
   s.skippedFiles.forEach(function (f) {
@@ -263,9 +268,9 @@ function render(s) {
   });
   $("skipWrap").className = s.skippedFiles.length ? "" : "hide";
 
-  $("accNote").textContent = n === 0
-    ? "所有登录态文件都是加密的，读不了。用 WorkBuddy 桌面端登录一次，或在 xdpool 插件卡片里点「添加账号」扫码，就会生成能用的凭据。"
-    : "网关直接读你现有的 WorkBuddy 登录态，不需要重新登录。带「无续期令牌」的账号过期后要重新登录一次。";
+  $("accNote").textContent = !a
+    ? "所有登录态文件都是加密的，读不了。用 WorkBuddy 桌面端登录一次，在 workbuddy-switch 里登录（凭据落在 ~/.wb-switch/accounts.json），或在 xdpool 插件卡片里点「添加账号」扫码，就会生成能用的凭据。"
+    : (s.note ? s.note + " " : "") + "网关只使用这一个账号，直接读你现有的登录态，不需要重新登录。无续期令牌的账号过期后要重新登录一次。";
 }
 
 function load() {
