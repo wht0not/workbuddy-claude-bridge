@@ -54,7 +54,7 @@ mimo | minimax | mistral | qwen | volc | wenxin | yi
 ### ③ tier 字段校验
 每条必须带 `anthropic_family_tier`，值限：**`opus` `sonnet` `haiku` `fable` `mythos`**(5 个）。
 
-→ 轮换赋值即可；同 tier 的条目会被标 `variantOf` 但**全部保留显示**。
+→ 在 5 个合法 tier 值之间循环分配即可；同 tier 的条目会被标 `variantOf` 但**全部保留显示**。
 
 ## 通过校验的白名单逻辑（`oSe()`)
 

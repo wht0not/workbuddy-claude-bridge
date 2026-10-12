@@ -43,11 +43,11 @@ node --version        # 确认 ≥ 22.18
 
 ```bash
 mkdir -p ~/wb-gateway
-cp -r /mnt/d/Users/28690/Desktop/workbuddy-claude-bridge/workbuddy-anthropic-gateway/* ~/wb-gateway/
+cp -r /mnt/d/Users/<你>/Desktop/workbuddy-claude-bridge/workbuddy-anthropic-gateway/* ~/wb-gateway/
 ```
 
 > 想省这一次复制、直接在 Windows 项目目录上跑也行
-> （`cd /mnt/d/Users/28690/Desktop/workbuddy-claude-bridge/workbuddy-anthropic-gateway`），
+> （`cd /mnt/d/Users/<你>/Desktop/workbuddy-claude-bridge/workbuddy-anthropic-gateway`），
 > 但那样 Windows / WSL 会抢同一个 8789 端口和 `data/api-key.txt`，**二选一，别同时跑**。
 > 推荐复制到 `~/wb-gateway`，两边互不干扰。
 
@@ -57,9 +57,9 @@ cp -r /mnt/d/Users/28690/Desktop/workbuddy-claude-bridge/workbuddy-anthropic-gat
 （WSL 里没有 `%LOCALAPPDATA%` 这种 Windows 环境变量，展开不了）：
 
 ```bash
-# 用模板生成 config.json（用户名 28690 已按本机填好；换机器就改这个 sed）
-sed 's|<你>|28690|g' \
-  /mnt/d/Users/28690/Desktop/workbuddy-claude-bridge/references/config-wsl.json \
+# 用模板生成 config.json：把 <你> 换成你的 Windows 用户名，生成 WSL 用的 config.json
+sed 's|<你>|你的Windows用户名|g' \
+  /mnt/d/Users/<你>/Desktop/workbuddy-claude-bridge/references/config-wsl.json \
   > ~/wb-gateway/config.json
 ```
 
@@ -68,12 +68,12 @@ sed 's|<你>|28690|g' \
 ```json
 "accounts": {
   "dirs": [
-    "/mnt/c/Users/28690/AppData/Local/CodeBuddyExtension/Data/Public/auth",
-    "/mnt/c/Users/28690/AppData/Roaming/CodeBuddyExtension/Data/Public/auth"
+    "/mnt/c/Users/<你>/AppData/Local/CodeBuddyExtension/Data/Public/auth",
+    "/mnt/c/Users/<你>/AppData/Roaming/CodeBuddyExtension/Data/Public/auth"
   ],
   "extraFiles": [],
   "wbSwitchFiles": [
-    "/mnt/c/Users/28690/.wb-switch/accounts.json"
+    "/mnt/c/Users/<你>/.wb-switch/accounts.json"
   ]
 }
 ```
@@ -81,8 +81,8 @@ sed 's|<你>|28690|g' \
 **先确认这两个路径在 WSL 里真的可见**（默认 automount 应该都有）：
 
 ```bash
-ls -l /mnt/c/Users/28690/.wb-switch/accounts.json
-ls -l /mnt/c/Users/28690/AppData/Local/CodeBuddyExtension/Data/Public/auth/
+ls -l /mnt/c/Users/<你>/.wb-switch/accounts.json
+ls -l /mnt/c/Users/<你>/AppData/Local/CodeBuddyExtension/Data/Public/auth/
 ```
 
 **凭据不用重新登录** —— workbuddy-switch 的账号库在 `/mnt/c` 下可读。
@@ -98,7 +98,7 @@ node src/server.ts
 
 ```
 账号    1 个可用
-        ✓ why not (4b626055) ← /mnt/c/Users/28690/.wb-switch/accounts.json
+        ✓ why not (4b626055) ← /mnt/c/Users/<你>/.wb-switch/accounts.json
         ✗ .../workbuddy-desktop.info → accessToken 不可用（$wbEncrypted 加密包装或缺失）   ← 这行是正常的，忽略
 ```
 
@@ -201,7 +201,7 @@ journalctl --user -u wb-gateway -n 20 --no-pager    # 看启动日志
 
 适合"不想在 WSL 再装一套 Node"的情况。代价是要改 `.wslconfig` 并重启 WSL（**会中断当前所有 WSL 会话**）。
 
-`C:\Users\28690\.wslconfig`（本机已有这个文件，加一行 `networkingMode=mirrored` 即可）：
+`C:\Users\<你>\.wslconfig`（若你已有这个文件，在里面加一行 `networkingMode=mirrored` 即可）：
 
 ```ini
 [wsl2]
@@ -238,7 +238,7 @@ export ANTHROPIC_BASE_URL="http://$(ip route show default | awk '{print $3}'):87
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `node src/server.ts` 报 `Unknown file extension ".ts"` / 语法错误 | Node < 22.18，没有类型剥离 | 升级 Node（A1） |
-| `healthz` 通了但 `accounts` 是空数组 | `wbSwitchFiles` 路径写错，或账号库在别的盘 | `ls -l /mnt/c/Users/28690/.wb-switch/accounts.json` 确认；路径必须绝对 |
+| `healthz` 通了但 `accounts` 是空数组 | `wbSwitchFiles` 路径写错，或账号库在别的盘 | `ls -l /mnt/c/Users/<你>/.wb-switch/accounts.json` 确认；路径必须绝对 |
 | 上游 401 / `API key 无效` | 用的是 Claude Code 里的 key，不是网关的 | `ANTHROPIC_AUTH_TOKEN` 取 `~/wb-gateway/data/api-key.txt` |
 | 上游连接失败（status 0） | WSL 里 DNS 或出网被限 | `curl -I https://copilot.tencent.com` 试上游连通性 |
 | 模型选择只有几个 / 时有时无 | cc-switch 缓存 | pitfalls.md #0：cc-switch「选用的模型」→「获取模型」 |

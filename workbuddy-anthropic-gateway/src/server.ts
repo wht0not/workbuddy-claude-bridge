@@ -570,7 +570,7 @@ const server = createServer((req, res) => {
         const rows = ordered.map((m, i) => {
           const alias = realToAlias.get(m.id) ?? m.id;
           const credit = m.credits ? m.credits.replace(/\s*credits?/i, "").trim() : "";
-          // tier 与假名序号同源轮换(序号 i → tier i%5),与 aliasFor 的 seq 对齐
+          // tier 在 5 个合法值之间循环分配(序号 i → tier i%5),与 aliasFor 的 seq 对齐
           const TIERS = ["opus", "sonnet", "haiku", "fable", "mythos"] as const;
           const tier = TIERS[(i + 1) % TIERS.length];
           // 上游表 maxInputTokens ≥ 1M 时声明 supports_1m,客户端才会生成 1M 上下文变体(默认按 200K)
